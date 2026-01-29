@@ -1,0 +1,98 @@
+{
+  "timestamp": "2026-01-29T15:23:58.764899",
+  "tests": [
+    {
+      "name": "CurriculumManager initialization",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "name": "Problem difficulty filtering",
+      "status": "PASS",
+      "details": "Easy: 11, Hard: 7"
+    },
+    {
+      "name": "Record learning attempt",
+      "status": "PASS",
+      "details": "New capability: 0.40"
+    },
+    {
+      "name": "Get curriculum statistics",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "name": "Get next curriculum problem",
+      "status": "PASS",
+      "details": "Selected: cnot"
+    },
+    {
+      "name": "MultiAgentCoordinator initialization",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "name": "Code similarity computation",
+      "status": "PASS",
+      "details": "Same: 1.00, Different: 0.43"
+    },
+    {
+      "name": "Voting selection",
+      "status": "PASS",
+      "details": "Selected code with majority vote"
+    },
+    {
+      "name": "QuantumHardwareManager initialization",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "name": "Simulator execution",
+      "status": "PASS",
+      "details": "Counts: {np.str_('11'): 45, np.str_('00'): 55}"
+    },
+    {
+      "name": "Hardware availability check",
+      "status": "PASS",
+      "details": "Simulator: ready"
+    },
+    {
+      "name": "AWS Braket (IonQ)",
+      "status": "SKIP",
+      "details": "Pending activation - will auto-enable when ready"
+    },
+    {
+      "name": "TeacherConfig initialization",
+      "status": "PASS",
+      "details": ""
+    },
+    {
+      "name": "SteppingStoneMemory store",
+      "status": "PASS",
+      "details": "Stored with ID: 67e854c5..."
+    },
+    {
+      "name": "SteppingStoneMemory retrieval",
+      "status": "PASS",
+      "details": "Found 1 similar problems"
+    },
+    {
+      "name": "Teacher API connection",
+      "status": "PASS",
+      "details": "Model: deepseek/deepseek-r1"
+    },
+    {
+      "name": "Curriculum adaptation",
+      "status": "PASS",
+      "details": "Capability: 0.25"
+    },
+    {
+      "name": "Memory population",
+      "status": "PASS",
+      "details": "Stored 3 problems"
+    }
+  ],
+  "passed": 17,
+  "failed": 0,
+  "skipped": 1
+}
