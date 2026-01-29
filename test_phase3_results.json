@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-01-29T15:23:58.764899",
+  "timestamp": "2026-01-29T15:57:26.711823",
   "tests": [
     {
       "name": "CurriculumManager initialization",
@@ -49,7 +49,7 @@
     {
       "name": "Simulator execution",
       "status": "PASS",
-      "details": "Counts: {np.str_('11'): 45, np.str_('00'): 55}"
+      "details": "Counts: {np.str_('00'): 52, np.str_('11'): 48}"
     },
     {
       "name": "Hardware availability check",
@@ -57,9 +57,14 @@
       "details": "Simulator: ready"
     },
     {
-      "name": "AWS Braket (IonQ)",
+      "name": "AWS Braket device catalog",
+      "status": "PASS",
+      "details": "Found 9 Braket devices (IonQ, Rigetti, IQM, etc.)"
+    },
+    {
+      "name": "AWS Braket (IonQ/Rigetti/IQM)",
       "status": "SKIP",
-      "details": "Pending activation - will auto-enable when ready"
+      "details": "Pending AWS activation - will auto-enable when ready"
     },
     {
       "name": "TeacherConfig initialization",
@@ -69,7 +74,7 @@
     {
       "name": "SteppingStoneMemory store",
       "status": "PASS",
-      "details": "Stored with ID: 67e854c5..."
+      "details": "Stored with ID: 9eac3ddb..."
     },
     {
       "name": "SteppingStoneMemory retrieval",
@@ -92,7 +97,7 @@
       "details": "Stored 3 problems"
     }
   ],
-  "passed": 17,
+  "passed": 18,
   "failed": 0,
   "skipped": 1
 }

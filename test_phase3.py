@@ -153,14 +153,15 @@ async def test_quantum_hardware():
     
     try:
         from quantum_hardware import (
-            QuantumHardwareManager, HardwareProvider, SimulatorClient, HardwareConfig
+            QuantumHardwareManager, HardwareProvider, HardwareConfig,
+            LocalSimulator, BRAKET_DEVICES, get_provider_info
         )
         
         # Test initialization
         manager = QuantumHardwareManager()
         log_test("QuantumHardwareManager initialization", True)
         
-        # Test simulator
+        # Test local simulator
         test_code = """from qiskit import QuantumCircuit
 qc = QuantumCircuit(2)
 qc.h(0)
@@ -168,7 +169,7 @@ qc.cx(0, 1)
 """
         result = await manager.run_on_hardware(
             test_code,
-            HardwareProvider.SIMULATOR,
+            provider="local_simulator",
             shots=100
         )
         log_test("Simulator execution",
@@ -178,12 +179,19 @@ qc.cx(0, 1)
         # Test hardware status
         status = await manager.get_available_hardware()
         log_test("Hardware availability check",
-                 "simulator" in status,
-                 f"Simulator: {status.get('simulator', {}).get('status')}")
+                 "local_simulator" in status,
+                 f"Simulator: {status.get('local_simulator', {}).get('status')}")
         
-        # Note about pending AWS Braket
-        log_test("AWS Braket (IonQ)", False, 
-                 "Pending activation - will auto-enable when ready", skipped=True)
+        # Test device listing
+        devices = manager.list_all_devices()
+        braket_devices = [d for d in devices if d['provider'] not in ['qiskit', 'ibm_quantum']]
+        log_test("AWS Braket device catalog",
+                 len(braket_devices) > 0,
+                 f"Found {len(braket_devices)} Braket devices (IonQ, Rigetti, IQM, etc.)")
+        
+        # Note about pending AWS Braket activation
+        log_test("AWS Braket (IonQ/Rigetti/IQM)", False, 
+                 "Pending AWS activation - will auto-enable when ready", skipped=True)
         
     except Exception as e:
         log_test("Quantum hardware module import", False, str(e))
