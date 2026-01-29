@@ -1,0 +1,18 @@
+# UniQ-MCP Server Dependencies
+
+# MCP SDK
+mcp[cli]>=1.2.0
+
+# HTTP client
+httpx>=0.24.0
+
+# Quantum computing
+qiskit>=1.0.0
+amazon-braket-sdk>=1.50.0
+
+# Vector database for episodic memory
+chromadb>=0.4.0
+
+# Utilities
+python-dotenv>=1.0.0
+numpy>=1.24.0

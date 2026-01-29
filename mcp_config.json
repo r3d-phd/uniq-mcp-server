@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "uniq-mcp": {
+      "command": "python3",
+      "args": [
+        "/path/to/uniq-mcp-server/server.py"
+      ],
+      "env": {
+        "AIRLOCK_URL": "https://your-tunnel.trycloudflare.com",
+        "AIRLOCK_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
