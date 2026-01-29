@@ -58,7 +58,7 @@ class ToolResponse(BaseModel):
 try:
     from curriculum import CurriculumManager, CURRICULUM_PROBLEMS, get_problems_by_difficulty
     from teacher import TeacherClient, SteppingStoneMemory, TeacherConfig
-    from multi_agent import MultiAgentCoordinator, InferenceBackend
+    from multi_agent import MultiAgentCoordinator, BackendType
     from quantum_hardware import QuantumHardwareManager, execute_on_quantum_hardware
     MODULES_LOADED = True
 except ImportError as e:
