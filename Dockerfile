@@ -22,4 +22,5 @@ ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
 # Run the server
-CMD ["python", "http_server.py", "--port", "8080"]
+# Use shell form so $PORT is expanded
+CMD python http_server.py --port ${PORT:-8080}
