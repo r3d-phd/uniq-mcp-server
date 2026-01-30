@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: uniq-mcp
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python http_server.py --port $PORT
+    healthCheckPath: /health
+    envVars:
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
