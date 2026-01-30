@@ -377,12 +377,12 @@ async def list_benchmarks() -> Dict[str, Any]:
     
     for problem in CURRICULUM_PROBLEMS:
         problems.append({
-            "id": problem.id,
-            "description": problem.description,
-            "difficulty": problem.difficulty,
-            "category": problem.category
+            "id": problem["id"],
+            "description": problem["description"],
+            "difficulty": problem["difficulty"],
+            "category": problem["category"]
         })
-        categories.add(problem.category)
+        categories.add(problem["category"])
     
     return {
         "total": len(problems),
@@ -408,7 +408,7 @@ async def run_benchmark(
     # Find the benchmark
     problem = None
     for p in CURRICULUM_PROBLEMS:
-        if p.id == benchmark_id:
+        if p["id"] == benchmark_id:
             problem = p
             break
     
@@ -419,16 +419,16 @@ async def run_benchmark(
     
     # Synthesize
     result = await synthesize_circuit(
-        problem.description,
+        problem["description"],
         model=model,
         verify=True
     )
     
     return {
         "benchmark_id": benchmark_id,
-        "description": problem.description,
-        "difficulty": problem.difficulty,
-        "category": problem.category,
+        "description": problem["description"],
+        "difficulty": problem["difficulty"],
+        "category": problem["category"],
         "success": result.get("valid", False),
         "code": result.get("code"),
         "verification": result.get("verification"),
@@ -495,7 +495,11 @@ async def execute_on_simulator(
     Returns:
         Execution results with measurement counts
     """
-    return await hardware_manager.run_on_simulator(circuit_code, shots)
+    return await hardware_manager.run_on_hardware(
+        circuit_code, 
+        provider="local_simulator",
+        shots=shots
+    )
 
 @mcp.tool()
 async def execute_on_hardware(
