@@ -451,7 +451,7 @@ def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="UniQ-MCP HTTP Server")
-    parser.add_argument("--port", type=int, default=8001, help="Port to run on")
+    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8080)), help="Port to run on")
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
     args = parser.parse_args()
     
