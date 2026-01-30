@@ -3,13 +3,7 @@
 UniQ-MCP HTTP Server Wrapper
 
 This server exposes UniQ-MCP tools via HTTP endpoints, allowing remote access
-from Manus cloud through a Cloudflare tunnel.
-
-Usage:
-    python http_server.py [--port 8001]
-    
-Then expose via Cloudflare:
-    cloudflared tunnel --url http://localhost:8001
+from Manus cloud through a Cloudflare tunnel or Railway deployment.
 """
 
 import os
@@ -80,7 +74,6 @@ def init_managers():
     
     curriculum_manager = CurriculumManager()
     hardware_manager = QuantumHardwareManager()
-    # Teacher and multi-agent are initialized on demand
 
 # ============================================================================
 # Tool Implementations
@@ -90,17 +83,19 @@ async def tool_check_server_status() -> Dict:
     """Check server status and available components."""
     return {
         "status": "online",
-        "version": "3.1",
+        "version": "4.0",
         "timestamp": datetime.utcnow().isoformat(),
+        "backend": "openrouter",
+        "default_model": os.getenv("UNIQ_DEFAULT_MODEL", "deepseek/deepseek-chat"),
+        "teacher_model": os.getenv("UNIQ_TEACHER_MODEL", "deepseek/deepseek-reasoner"),
+        "openrouter": {
+            "status": "healthy" if os.getenv("OPENROUTER_API_KEY") else "not_configured",
+            "models_available": bool(os.getenv("OPENROUTER_API_KEY"))
+        },
         "modules": {
             "curriculum": curriculum_manager is not None,
             "hardware": hardware_manager is not None,
-            "teacher": MODULES_LOADED,
-            "multi_agent": MODULES_LOADED
-        },
-        "airlock": {
-            "url": os.getenv("AIRLOCK_URL", "not_configured"),
-            "configured": bool(os.getenv("AIRLOCK_URL"))
+            "teacher": MODULES_LOADED
         }
     }
 
@@ -129,7 +124,6 @@ async def tool_get_curriculum_problem(category: str = None, max_difficulty: floa
     if not curriculum_manager:
         return {"error": "Curriculum manager not initialized"}
     
-    # Filter problems
     if category:
         problems = [p for p in CURRICULUM_PROBLEMS if p["category"] == category]
     else:
@@ -214,15 +208,15 @@ async def tool_list_all_devices() -> Dict:
     
     return {"devices": hardware_manager.list_all_devices()}
 
-async def tool_synthesize_circuit(description: str, max_attempts: int = 3) -> Dict:
-    """Synthesize a quantum circuit from description using Airlock."""
+async def tool_synthesize_circuit(description: str, model: str = None, max_attempts: int = 3) -> Dict:
+    """Synthesize a quantum circuit from description using OpenRouter."""
     import httpx
     
-    airlock_url = os.getenv("AIRLOCK_URL")
-    airlock_key = os.getenv("AIRLOCK_API_KEY", "")
+    api_key = os.getenv("OPENROUTER_API_KEY")
+    if not api_key:
+        return {"error": "OPENROUTER_API_KEY not configured"}
     
-    if not airlock_url:
-        return {"error": "AIRLOCK_URL not configured"}
+    model = model or os.getenv("UNIQ_DEFAULT_MODEL", "deepseek/deepseek-chat")
     
     prompt = f"""You are a quantum computing expert. Generate a Qiskit circuit for the following:
 
@@ -239,13 +233,14 @@ Respond with ONLY the Python code, no explanations."""
     try:
         async with httpx.AsyncClient(timeout=60.0) as client:
             response = await client.post(
-                f"{airlock_url}/generate",
+                "https://openrouter.ai/api/v1/chat/completions",
                 headers={
                     "Content-Type": "application/json",
-                    "Authorization": f"Bearer {airlock_key}"
+                    "Authorization": f"Bearer {api_key}"
                 },
                 json={
-                    "prompt": prompt,
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
                     "max_tokens": 500,
                     "temperature": 0.3
                 }
@@ -253,7 +248,7 @@ Respond with ONLY the Python code, no explanations."""
             
             if response.status_code == 200:
                 result = response.json()
-                code = result.get("response", result.get("text", ""))
+                code = result["choices"][0]["message"]["content"]
                 
                 # Clean up code
                 if "```python" in code:
@@ -264,10 +259,11 @@ Respond with ONLY the Python code, no explanations."""
                 return {
                     "success": True,
                     "code": code.strip(),
-                    "description": description
+                    "description": description,
+                    "model": model
                 }
             else:
-                return {"error": f"Airlock returned {response.status_code}"}
+                return {"error": f"OpenRouter returned {response.status_code}: {response.text}"}
                 
     except Exception as e:
         return {"error": str(e)}
@@ -319,7 +315,7 @@ TOOLS = {
 app = FastAPI(
     title="UniQ-MCP HTTP Server",
     description="HTTP interface for UniQ-MCP quantum circuit synthesis tools",
-    version="3.1"
+    version="4.0"
 )
 
 # CORS middleware for cross-origin requests
@@ -343,7 +339,7 @@ async def root():
     """Root endpoint with server info."""
     return {
         "name": "UniQ-MCP HTTP Server",
-        "version": "3.1",
+        "version": "4.0",
         "status": "online",
         "endpoints": {
             "/health": "Health check",
@@ -447,28 +443,17 @@ async def mcp_call_tool(request: Request):
 # Main Entry Point
 # ============================================================================
 
-def main():
-    import argparse
-    
-    parser = argparse.ArgumentParser(description="UniQ-MCP HTTP Server")
-    parser.add_argument("--port", type=int, default=int(os.getenv("PORT", 8080)), help="Port to run on")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Host to bind to")
-    args = parser.parse_args()
+if __name__ == "__main__":
+    # Get port from environment variable (Railway sets this)
+    port = int(os.getenv("PORT", 8080))
+    host = os.getenv("HOST", "0.0.0.0")
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║              UniQ-MCP HTTP Server v3.1                       ║
+║              UniQ-MCP HTTP Server v4.0                       ║
 ╠══════════════════════════════════════════════════════════════╣
-║  Starting on http://{args.host}:{args.port}                          ║
-║                                                              ║
-║  To expose via Cloudflare tunnel:                            ║
-║  $ cloudflared tunnel --url http://localhost:{args.port}             ║
-║                                                              ║
-║  Then update Manus MCP config with the tunnel URL            ║
+║  Starting on http://{host}:{port}                             ║
 ╚══════════════════════════════════════════════════════════════╝
 """)
     
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
-
-if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host=host, port=port, log_level="info")

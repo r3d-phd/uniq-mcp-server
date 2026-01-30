@@ -14,13 +14,11 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-# Expose port
+# Expose port (Railway will override with PORT env var)
 EXPOSE 8080
 
 # Set environment variables
-ENV PORT=8080
 ENV PYTHONUNBUFFERED=1
 
-# Run the server
-# Use shell form so $PORT is expanded
-CMD python http_server.py --port ${PORT:-8080}
+# Run the server - it reads PORT from environment
+CMD ["python", "http_server.py"]
