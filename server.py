@@ -1,14 +1,14 @@
 """
-UniQ-MCP Server v3 - Quantum Circuit Synthesis with SOAR Framework
+UniQ-MCP Server v4 - Simplified Quantum Circuit Synthesis
 
 This server exposes quantum circuit synthesis capabilities as MCP tools
-with full SOAR (Self-Optimization via Asymmetric RL) integration.
+using OpenRouter API directly - no local GPU or tunnels required!
 
-Phase 3 Features:
+Features:
+- Direct OpenRouter integration (DeepSeek, Claude, GPT-4, etc.)
 - Teacher-Student architecture for stepping stone generation
 - RL-based curriculum pacing with adaptive difficulty
-- Multi-agent parallel synthesis
-- Real quantum hardware integration (IBM Quantum, IonQ, AWS Braket)
+- Real quantum hardware integration (AWS Braket)
 - Episodic memory with ChromaDB
 """
 
@@ -34,13 +34,12 @@ logger = logging.getLogger("uniq-mcp")
 from mcp.server.fastmcp import FastMCP
 
 # Phase 3 module imports
-from teacher import TeacherClient, TeacherConfig, SteppingStoneMemory, test_teacher_connection
+from teacher import TeacherClient, TeacherConfig, SteppingStoneMemory
 from curriculum import CurriculumManager, CurriculumConfig, CURRICULUM_PROBLEMS, get_problems_by_difficulty
-from multi_agent import MultiAgentCoordinator, MultiAgentConfig
-from quantum_hardware import QuantumHardwareManager, HardwareProvider, execute_on_quantum_hardware
+from quantum_hardware import QuantumHardwareManager, execute_on_quantum_hardware
 
 # Initialize FastMCP server
-mcp = FastMCP("uniq-mcp-v3", dependencies=["qiskit", "httpx", "chromadb"])
+mcp = FastMCP("uniq-mcp-v4", dependencies=["qiskit", "httpx", "chromadb"])
 
 # ============================================================================
 # Configuration
@@ -49,852 +48,587 @@ mcp = FastMCP("uniq-mcp-v3", dependencies=["qiskit", "httpx", "chromadb"])
 @dataclass
 class Config:
     """Server configuration loaded from environment variables."""
-    airlock_url: str = ""
-    airlock_api_key: str = ""
     openrouter_api_key: str = ""
-    ibm_quantum_token: str = ""
+    default_model: str = "deepseek/deepseek-chat"  # Fast and good for code
+    teacher_model: str = "deepseek/deepseek-reasoner"  # DeepSeek-R1 for reasoning
     aws_region: str = "us-east-1"
     
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
-            airlock_url=os.getenv("AIRLOCK_URL", ""),
-            airlock_api_key=os.getenv("AIRLOCK_API_KEY", ""),
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
-            ibm_quantum_token=os.getenv("IBM_QUANTUM_TOKEN", ""),
+            default_model=os.getenv("UNIQ_DEFAULT_MODEL", "deepseek/deepseek-chat"),
+            teacher_model=os.getenv("UNIQ_TEACHER_MODEL", "deepseek/deepseek-reasoner"),
             aws_region=os.getenv("AWS_DEFAULT_REGION", "us-east-1"),
         )
 
 config = Config.from_env()
 
-# Initialize Phase 3 components
+# Initialize components
 curriculum_manager = CurriculumManager()
 stepping_stone_memory = SteppingStoneMemory()
-multi_agent = MultiAgentCoordinator()
 hardware_manager = QuantumHardwareManager()
 
 # ============================================================================
-# Airlock Client (Local GPU - Student Model)
+# OpenRouter Client (Cloud LLM - replaces Airlock)
 # ============================================================================
 
 import httpx
 
-async def airlock_generate(prompt: str, max_tokens: int = 500) -> str:
-    """Generate text using Airlock (local GPU with Mistral 7B)."""
-    if not config.airlock_url or not config.airlock_api_key:
-        raise ValueError("Airlock not configured. Set AIRLOCK_URL and AIRLOCK_API_KEY.")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+async def openrouter_generate(
+    prompt: str, 
+    max_tokens: int = 1000,
+    model: Optional[str] = None,
+    temperature: float = 0.7
+) -> str:
+    """Generate text using OpenRouter API."""
+    if not config.openrouter_api_key:
+        raise ValueError("OpenRouter not configured. Set OPENROUTER_API_KEY environment variable.")
+    
+    model = model or config.default_model
     
     async with httpx.AsyncClient(timeout=120.0) as client:
         response = await client.post(
-            f"{config.airlock_url}/generate",
+            f"{OPENROUTER_BASE_URL}/chat/completions",
             headers={
+                "Authorization": f"Bearer {config.openrouter_api_key}",
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {config.airlock_api_key}"
+                "HTTP-Referer": "https://uniq-mcp.research",
+                "X-Title": "UniQ-MCP Quantum Circuit Synthesis"
             },
-            json={"prompt": prompt, "max_tokens": max_tokens}
+            json={
+                "model": model,
+                "messages": [{"role": "user", "content": prompt}],
+                "max_tokens": max_tokens,
+                "temperature": temperature
+            }
         )
         response.raise_for_status()
         data = response.json()
-        return data.get("response", data.get("generated_text", data.get("text", "")))
+        return data["choices"][0]["message"]["content"]
 
-async def check_airlock_health() -> dict:
-    """Check Airlock server health."""
-    if not config.airlock_url:
-        return {"status": "not_configured", "healthy": False}
+async def check_openrouter_health() -> dict:
+    """Check OpenRouter API availability."""
+    if not config.openrouter_api_key:
+        return {"status": "not_configured", "error": "OPENROUTER_API_KEY not set"}
     
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                f"{config.airlock_url}/health",
-                headers={"Authorization": f"Bearer {config.airlock_api_key}"}
+                f"{OPENROUTER_BASE_URL}/models",
+                headers={"Authorization": f"Bearer {config.openrouter_api_key}"}
             )
             if response.status_code == 200:
-                return {"status": "healthy", "healthy": True, "details": response.json()}
-            return {"status": "unhealthy", "healthy": False, "code": response.status_code}
+                return {"status": "healthy", "models_available": True}
+            else:
+                return {"status": "error", "code": response.status_code}
     except Exception as e:
-        return {"status": "error", "healthy": False, "error": str(e)}
+        return {"status": "error", "error": str(e)}
 
 # ============================================================================
-# Circuit Synthesis (Student)
+# Circuit Synthesis Prompts
 # ============================================================================
 
-SYNTHESIS_PROMPT = """Generate Qiskit code for: {description}
+SYNTHESIS_SYSTEM_PROMPT = """You are an expert quantum computing engineer specializing in Qiskit circuit synthesis.
 
-Rules:
-- Use variable name 'qc' for the circuit
-- Qiskit 2.x only (no Aer, no execute, no transpile)
-- Output ONLY code, no explanations
+Your task is to generate valid Qiskit Python code that creates the requested quantum circuit.
 
-Example format:
+IMPORTANT RULES:
+1. Always use 'from qiskit import QuantumCircuit' at the start
+2. Create a QuantumCircuit object named 'qc'
+3. Add classical registers if measurements are needed
+4. Use standard Qiskit gates: h(), x(), y(), z(), cx(), cz(), swap(), t(), s(), rx(), ry(), rz(), etc.
+5. Include measurements with qc.measure() if the circuit should be executable
+6. Return ONLY the Python code, no explanations
+
+Example output format:
+```python
 from qiskit import QuantumCircuit
-qc = QuantumCircuit(2)
+
+qc = QuantumCircuit(2, 2)
 qc.h(0)
 qc.cx(0, 1)
+qc.measure([0, 1], [0, 1])
+```
+"""
 
-Your code:"""
+def create_synthesis_prompt(description: str, constraints: Optional[Dict] = None) -> str:
+    """Create a prompt for circuit synthesis."""
+    prompt = f"{SYNTHESIS_SYSTEM_PROMPT}\n\nCreate a quantum circuit that: {description}"
+    
+    if constraints:
+        if constraints.get("max_qubits"):
+            prompt += f"\n- Maximum qubits: {constraints['max_qubits']}"
+        if constraints.get("max_depth"):
+            prompt += f"\n- Maximum circuit depth: {constraints['max_depth']}"
+        if constraints.get("allowed_gates"):
+            prompt += f"\n- Allowed gates: {', '.join(constraints['allowed_gates'])}"
+    
+    prompt += "\n\nProvide ONLY the Python code:"
+    return prompt
 
-def extract_circuit_code(response: str) -> str:
-    """Extract clean circuit code from LLM response."""
-    import re
-    
-    if isinstance(response, dict):
-        response = response.get('response', response.get('generated_text', response.get('text', str(response))))
-    
-    # Remove markdown code blocks
-    code_block_match = re.search(r'```(?:python)?\s*\n?(.*?)\n?```', response, re.DOTALL)
-    if code_block_match:
-        response = code_block_match.group(1)
-    elif "```python" in response:
-        response = response.split("```python")[1].split("```")[0]
+def extract_code_from_response(response: str) -> str:
+    """Extract Python code from LLM response."""
+    # Try to extract code block
+    if "```python" in response:
+        start = response.find("```python") + 9
+        end = response.find("```", start)
+        if end > start:
+            return response[start:end].strip()
     elif "```" in response:
-        parts = response.split("```")
-        if len(parts) >= 2:
-            response = parts[1]
+        start = response.find("```") + 3
+        end = response.find("```", start)
+        if end > start:
+            return response[start:end].strip()
     
-    # Clean up
+    # If no code block, return cleaned response
     lines = response.strip().split('\n')
-    clean_lines = []
-    
-    for line in lines:
-        if any(skip in line.lower() for skip in ['aer', 'execute', 'backend', 'simulator', 'transpile', 'run(', 'print(', 'draw(']):
-            continue
-        if not clean_lines and not line.strip():
-            continue
-        clean_lines.append(line)
-    
-    code = '\n'.join(clean_lines).strip()
-    
-    # Normalize variable name to 'qc'
-    circuit_var_match = re.search(r'(\w+)\s*=\s*QuantumCircuit\s*\(', code)
-    if circuit_var_match:
-        var_name = circuit_var_match.group(1)
-        if var_name != 'qc':
-            code = re.sub(rf'\b{var_name}\b', 'qc', code)
-    
-    # Ensure import
-    if 'from qiskit import QuantumCircuit' not in code and 'import qiskit' not in code:
-        code = 'from qiskit import QuantumCircuit\n' + code
-    
-    return code
-
-async def synthesize_with_student(description: str) -> dict:
-    """Synthesize using the Student model (Airlock/Mistral 7B)."""
-    prompt = SYNTHESIS_PROMPT.format(description=description)
-    
-    try:
-        response = await airlock_generate(prompt, max_tokens=500)
-        code = extract_circuit_code(response)
-        
-        # Validate
-        try:
-            exec_globals = {}
-            exec(code, exec_globals)
-            if 'qc' in exec_globals:
-                return {"success": True, "code": code, "error": None}
-            else:
-                return {"success": False, "code": code, "error": "No circuit 'qc' found"}
-        except Exception as e:
-            return {"success": False, "code": code, "error": f"Validation failed: {str(e)}"}
-    except Exception as e:
-        return {"success": False, "code": None, "error": f"Generation failed: {str(e)}"}
+    code_lines = [l for l in lines if not l.startswith('#') or 'import' in l.lower()]
+    return '\n'.join(code_lines)
 
 # ============================================================================
 # Circuit Verification
 # ============================================================================
 
-def verify_circuits(code1: str, code2: str) -> dict:
-    """Verify that two circuits are equivalent."""
+def verify_circuit_code(code: str) -> Dict[str, Any]:
+    """Verify that circuit code is valid and extract properties."""
     try:
-        from qiskit.quantum_info import Operator
+        # Create isolated namespace
+        namespace = {}
+        exec(code, namespace)
         
-        exec_globals1 = {}
-        exec_globals2 = {}
-        exec(code1, exec_globals1)
-        exec(code2, exec_globals2)
-        
-        qc1 = exec_globals1.get('qc')
-        qc2 = exec_globals2.get('qc')
-        
-        if qc1 is None or qc2 is None:
-            return {"equivalent": False, "method": "error", "details": "Could not extract circuits"}
-        
-        op1 = Operator(qc1)
-        op2 = Operator(qc2)
-        equivalent = op1.equiv(op2)
-        
-        return {
-            "equivalent": equivalent,
-            "method": "unitary_comparison",
-            "details": "Equivalent (up to global phase)" if equivalent else "Not equivalent"
-        }
-    except Exception as e:
-        return {"equivalent": False, "method": "error", "details": str(e)}
-
-def analyze_circuit(code: str) -> dict:
-    """Analyze circuit properties."""
-    try:
-        exec_globals = {}
-        exec(code, exec_globals)
-        qc = exec_globals.get('qc')
+        # Find the circuit
+        qc = namespace.get('qc')
+        if qc is None:
+            for var in namespace.values():
+                if hasattr(var, 'num_qubits') and hasattr(var, 'depth'):
+                    qc = var
+                    break
         
         if qc is None:
-            return {"error": "No circuit 'qc' found"}
-        
-        gate_counts = {}
-        for instruction in qc.data:
-            gate_name = instruction.operation.name
-            gate_counts[gate_name] = gate_counts.get(gate_name, 0) + 1
+            return {"valid": False, "error": "No QuantumCircuit found in code"}
         
         return {
+            "valid": True,
             "num_qubits": qc.num_qubits,
+            "num_clbits": qc.num_clbits,
             "depth": qc.depth(),
-            "gate_count": sum(gate_counts.values()),
-            "gates_by_type": gate_counts,
-            "num_parameters": qc.num_parameters
+            "gate_count": len(qc.data),
+            "gates": [instr.operation.name for instr in qc.data]
         }
     except Exception as e:
-        return {"error": str(e)}
+        return {"valid": False, "error": str(e)}
 
 # ============================================================================
-# Reference Solutions
+# MCP Tools
 # ============================================================================
 
-REFERENCE_SOLUTIONS = {
-    "bell_state": """from qiskit import QuantumCircuit
-qc = QuantumCircuit(2)
-qc.h(0)
-qc.cx(0, 1)""",
-    "ghz_3": """from qiskit import QuantumCircuit
-qc = QuantumCircuit(3)
-qc.h(0)
-qc.cx(0, 1)
-qc.cx(0, 2)""",
-    "x_gate": """from qiskit import QuantumCircuit
-qc = QuantumCircuit(1)
-qc.x(0)""",
-    "h_gate": """from qiskit import QuantumCircuit
-qc = QuantumCircuit(1)
-qc.h(0)""",
-    "cnot": """from qiskit import QuantumCircuit
-qc = QuantumCircuit(2)
-qc.cx(0, 1)""",
-}
-
-# ============================================================================
-# MCP Tools - Core Synthesis
-# ============================================================================
+@mcp.tool()
+async def check_server_status() -> Dict[str, Any]:
+    """Check UniQ-MCP server status and available components."""
+    openrouter_status = await check_openrouter_health()
+    
+    return {
+        "status": "online",
+        "version": "4.0",
+        "timestamp": datetime.now().isoformat(),
+        "backend": "openrouter",
+        "default_model": config.default_model,
+        "teacher_model": config.teacher_model,
+        "openrouter": openrouter_status,
+        "modules": {
+            "curriculum": True,
+            "hardware": True,
+            "teacher": True
+        }
+    }
 
 @mcp.tool()
 async def synthesize_circuit(
     description: str,
-    use_teacher: bool = False,
-    max_attempts: int = 3
-) -> dict:
-    """Generate a quantum circuit from natural language description.
+    max_qubits: Optional[int] = None,
+    max_depth: Optional[int] = None,
+    model: Optional[str] = None,
+    verify: bool = True
+) -> Dict[str, Any]:
+    """
+    Synthesize a quantum circuit from natural language description.
     
     Args:
         description: Natural language description of the desired circuit
-        use_teacher: Whether to use Teacher for stepping stones if Student fails
-        max_attempts: Maximum synthesis attempts
+        max_qubits: Optional maximum number of qubits
+        max_depth: Optional maximum circuit depth
+        model: Optional model override (default: deepseek/deepseek-chat)
+        verify: Whether to verify the generated code
     
     Returns:
-        Dictionary with code, success status, and analysis
+        Dictionary with synthesized code and verification results
     """
-    logger.info(f"Synthesizing circuit: {description}")
+    start_time = time.time()
     
-    # Try with Student first
-    for attempt in range(max_attempts):
-        result = await synthesize_with_student(description)
-        
-        if result["success"]:
-            analysis = analyze_circuit(result["code"])
-            
-            # Record success in curriculum
-            curriculum_manager.record_attempt(
-                problem_id=f"custom_{hash(description) % 10000}",
-                description=description,
-                difficulty=0.5,  # Estimate
-                success=True,
-                synthesis_time=0,
-                attempts=attempt + 1,
-                category="custom"
-            )
-            
-            # Store in episodic memory
-            stepping_stone_memory.store_stepping_stone(
-                problem_desc=description,
-                circuit_qasm=result["code"],
-                difficulty=0.5,
-                verified=True
-            )
-            
-            return {
-                "success": True,
-                "code": result["code"],
-                "attempts": attempt + 1,
-                "analysis": analysis,
-                "method": "student"
-            }
+    constraints = {}
+    if max_qubits:
+        constraints["max_qubits"] = max_qubits
+    if max_depth:
+        constraints["max_depth"] = max_depth
     
-    # If Student failed and Teacher is enabled
-    if use_teacher and config.openrouter_api_key:
-        logger.info("Student failed, requesting Teacher stepping stone...")
+    prompt = create_synthesis_prompt(description, constraints if constraints else None)
+    
+    try:
+        response = await openrouter_generate(prompt, max_tokens=1000, model=model)
+        code = extract_code_from_response(response)
         
-        async with TeacherClient() as teacher:
-            stepping_stone = await teacher.generate_stepping_stone(
-                target_problem=description,
-                capability_level=curriculum_manager.state.capability_level,
-                failure_trace=result.get("error", "")
+        result = {
+            "success": True,
+            "code": code,
+            "model": model or config.default_model,
+            "synthesis_time": time.time() - start_time
+        }
+        
+        if verify:
+            verification = verify_circuit_code(code)
+            result["verification"] = verification
+            result["valid"] = verification.get("valid", False)
+        
+        return result
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "synthesis_time": time.time() - start_time
+        }
+
+@mcp.tool()
+async def synthesize_with_teacher(
+    description: str,
+    difficulty: float = 0.5,
+    use_stepping_stones: bool = True
+) -> Dict[str, Any]:
+    """
+    Synthesize a circuit using Teacher-guided approach with stepping stones.
+    
+    Args:
+        description: Natural language description of the target circuit
+        difficulty: Difficulty level (0.0 to 1.0)
+        use_stepping_stones: Whether to generate intermediate problems
+    
+    Returns:
+        Dictionary with synthesis results and learning path
+    """
+    start_time = time.time()
+    results = {"steps": [], "final_code": None}
+    
+    try:
+        if use_stepping_stones and difficulty > 0.3:
+            # Generate stepping stones using Teacher model
+            stepping_prompt = f"""As a quantum computing teacher, break down this problem into simpler steps:
+
+Target: {description}
+Difficulty: {difficulty}
+
+Generate 2-3 stepping stone problems that build up to the target.
+Format each as: "Step N: [simpler problem description]"
+"""
+            stepping_response = await openrouter_generate(
+                stepping_prompt, 
+                model=config.teacher_model,
+                max_tokens=500
             )
             
-            if stepping_stone["success"]:
-                return {
-                    "success": False,
-                    "original_error": result.get("error"),
-                    "stepping_stone": stepping_stone["stepping_stone"],
-                    "recommendation": "Try the stepping stone problem first",
-                    "method": "teacher_intervention"
-                }
+            # Parse stepping stones
+            steps = []
+            for line in stepping_response.split('\n'):
+                if line.strip().startswith('Step'):
+                    steps.append(line.strip())
+            
+            # Synthesize each step
+            for i, step in enumerate(steps[:3]):  # Max 3 steps
+                step_result = await synthesize_circuit(step, verify=True)
+                results["steps"].append({
+                    "step": i + 1,
+                    "description": step,
+                    "result": step_result
+                })
+        
+        # Final synthesis
+        final_result = await synthesize_circuit(description, verify=True)
+        results["final_code"] = final_result.get("code")
+        results["final_verification"] = final_result.get("verification")
+        results["success"] = final_result.get("valid", False)
+        results["total_time"] = time.time() - start_time
+        
+        return results
+        
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "total_time": time.time() - start_time
+        }
+
+@mcp.tool()
+async def list_benchmarks() -> Dict[str, Any]:
+    """List all available curriculum benchmark problems."""
+    problems = []
+    categories = set()
+    
+    for problem in CURRICULUM_PROBLEMS:
+        problems.append({
+            "id": problem.id,
+            "description": problem.description,
+            "difficulty": problem.difficulty,
+            "category": problem.category
+        })
+        categories.add(problem.category)
     
     return {
-        "success": False,
-        "code": result.get("code"),
-        "attempts": max_attempts,
-        "error": result.get("error", "Max attempts reached"),
-        "method": "student_failed"
+        "total": len(problems),
+        "problems": sorted(problems, key=lambda x: x["difficulty"]),
+        "categories": list(categories)
     }
 
 @mcp.tool()
-async def synthesize_with_stepping_stones(
-    target_description: str,
-    num_steps: int = 3
-) -> dict:
-    """Generate a curriculum of stepping stones leading to the target circuit.
-    
-    This uses the Teacher to create a learning path from simple to complex.
+async def run_benchmark(
+    benchmark_id: str,
+    model: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Run a specific benchmark problem.
     
     Args:
-        target_description: Description of the target (hard) circuit
-        num_steps: Number of stepping stones to generate
+        benchmark_id: ID of the benchmark (e.g., 'bell_state', 'ghz_3')
+        model: Optional model override
     
     Returns:
-        Dictionary with curriculum and synthesis results
+        Benchmark results including success, time, and verification
     """
-    if not config.openrouter_api_key:
-        return {"error": "Teacher not configured. Set OPENROUTER_API_KEY."}
-    
-    logger.info(f"Generating curriculum for: {target_description}")
-    
-    async with TeacherClient() as teacher:
-        curriculum = await teacher.generate_curriculum(
-            target_problem=target_description,
-            num_steps=num_steps,
-            start_difficulty=curriculum_manager.state.capability_level
-        )
-        
-        if not curriculum["success"]:
-            return {"error": "Failed to generate curriculum", "details": curriculum}
-        
-        # Try to synthesize each stepping stone
-        results = []
-        for step in curriculum["curriculum"]:
-            ss = step.get("stepping_stone", {})
-            desc = ss.get("description", "")
-            
-            if desc:
-                synth_result = await synthesize_with_student(desc)
-                results.append({
-                    "step": step["step_number"],
-                    "description": desc,
-                    "difficulty": ss.get("estimated_difficulty", 0),
-                    "synthesis_success": synth_result["success"],
-                    "code": synth_result.get("code") if synth_result["success"] else None
-                })
-        
-        return {
-            "success": True,
-            "target": target_description,
-            "curriculum": results,
-            "num_steps_completed": sum(1 for r in results if r["synthesis_success"])
-        }
-
-# ============================================================================
-# MCP Tools - Verification & Analysis
-# ============================================================================
-
-@mcp.tool()
-async def verify_circuit(circuit_code: str, reference_code: str) -> dict:
-    """Verify that a circuit implements the expected functionality.
-    
-    Args:
-        circuit_code: Qiskit circuit code to verify
-        reference_code: Reference circuit code for comparison
-    
-    Returns:
-        Dictionary with equivalence result and details
-    """
-    logger.info("Verifying circuit equivalence")
-    return verify_circuits(circuit_code, reference_code)
-
-@mcp.tool()
-async def analyze_quantum_circuit(circuit_code: str) -> dict:
-    """Analyze circuit properties and metrics.
-    
-    Args:
-        circuit_code: Qiskit circuit code to analyze
-    
-    Returns:
-        Dictionary with circuit metrics
-    """
-    logger.info("Analyzing circuit")
-    return analyze_circuit(circuit_code)
-
-# ============================================================================
-# MCP Tools - Curriculum & Learning
-# ============================================================================
-
-@mcp.tool()
-async def get_curriculum_problem(
-    difficulty: float = 0.5,
-    category: str = ""
-) -> dict:
-    """Get a problem from the adaptive curriculum.
-    
-    Args:
-        difficulty: Target difficulty (0.0 to 1.0)
-        category: Problem category filter (optional)
-    
-    Returns:
-        A problem matching the criteria
-    """
-    problems = get_problems_by_difficulty(
-        min_diff=max(0, difficulty - 0.15),
-        max_diff=min(1, difficulty + 0.15),
-        category=category
-    )
-    
-    if not problems:
-        problems = CURRICULUM_PROBLEMS
-    
-    selected = curriculum_manager.get_next_problem(problems, category)
-    
-    if selected:
-        return {
-            "problem_id": selected["id"],
-            "description": selected["description"],
-            "difficulty": selected["difficulty"],
-            "category": selected["category"],
-            "student_capability": curriculum_manager.state.capability_level
-        }
-    
-    return {"error": "No matching problem found"}
-
-@mcp.tool()
-async def record_learning_attempt(
-    problem_id: str,
-    description: str,
-    difficulty: float,
-    success: bool,
-    synthesis_time: float,
-    category: str = ""
-) -> dict:
-    """Record a learning attempt for curriculum adaptation.
-    
-    Args:
-        problem_id: Problem identifier
-        description: Problem description
-        difficulty: Problem difficulty (0-1)
-        success: Whether synthesis succeeded
-        synthesis_time: Time taken in seconds
-        category: Problem category
-    
-    Returns:
-        Updated curriculum state and recommendations
-    """
-    return curriculum_manager.record_attempt(
-        problem_id=problem_id,
-        description=description,
-        difficulty=difficulty,
-        success=success,
-        synthesis_time=synthesis_time,
-        attempts=1,
-        category=category
-    )
-
-@mcp.tool()
-async def get_curriculum_statistics() -> dict:
-    """Get comprehensive curriculum learning statistics.
-    
-    Returns:
-        Statistics about learning progress
-    """
-    return curriculum_manager.get_statistics()
-
-# ============================================================================
-# MCP Tools - Execution
-# ============================================================================
-
-@mcp.tool()
-async def execute_on_simulator(circuit_code: str, shots: int = 1000) -> dict:
-    """Execute a circuit on a local simulator.
-    
-    Args:
-        circuit_code: Qiskit circuit code
-        shots: Number of shots (default: 1000)
-    
-    Returns:
-        Dictionary with measurement counts
-    """
-    logger.info(f"Executing circuit on simulator ({shots} shots)")
-    return await execute_on_quantum_hardware(circuit_code, "simulator", "", shots)
-
-@mcp.tool()
-async def execute_on_hardware(
-    circuit_code: str,
-    provider: str = "simulator",
-    backend: str = "",
-    shots: int = 1000
-) -> dict:
-    """Execute a circuit on quantum hardware.
-    
-    Args:
-        circuit_code: Qiskit circuit code
-        provider: "simulator", "ibm_quantum", or "ionq"
-        backend: Specific backend name (optional)
-        shots: Number of shots
-    
-    Returns:
-        Dictionary with execution results
-    
-    Note: IBM Quantum and IonQ require respective API tokens.
-          AWS Braket activation is pending.
-    """
-    logger.info(f"Executing circuit on {provider} ({shots} shots)")
-    return await execute_on_quantum_hardware(circuit_code, provider, backend, shots)
-
-@mcp.tool()
-async def get_available_hardware() -> dict:
-    """Get status of available quantum hardware.
-    
-    Returns:
-        Dictionary with hardware availability status
-    """
-    return await hardware_manager.get_available_hardware()
-
-# ============================================================================
-# MCP Tools - Benchmarks
-# ============================================================================
-
-@mcp.tool()
-async def run_benchmark(benchmark_id: str, max_attempts: int = 3) -> dict:
-    """Run a specific benchmark problem.
-    
-    Args:
-        benchmark_id: Benchmark problem ID
-        max_attempts: Maximum synthesis attempts
-    
-    Returns:
-        Dictionary with benchmark results
-    """
-    logger.info(f"Running benchmark: {benchmark_id}")
-    
-    # Find benchmark
-    benchmark = None
-    for b in CURRICULUM_PROBLEMS:
-        if b["id"] == benchmark_id:
-            benchmark = b
+    # Find the benchmark
+    problem = None
+    for p in CURRICULUM_PROBLEMS:
+        if p.id == benchmark_id:
+            problem = p
             break
     
-    if not benchmark:
-        return {"error": f"Benchmark '{benchmark_id}' not found"}
+    if not problem:
+        return {"success": False, "error": f"Benchmark '{benchmark_id}' not found"}
     
     start_time = time.time()
-    result = await synthesize_circuit(benchmark["description"], max_attempts=max_attempts)
-    elapsed = time.time() - start_time
     
-    # Verify against reference
-    verification = None
-    if result["success"] and benchmark_id in REFERENCE_SOLUTIONS:
-        verification = verify_circuits(result["code"], REFERENCE_SOLUTIONS[benchmark_id])
-    
-    # Record in curriculum
-    curriculum_manager.record_attempt(
-        problem_id=benchmark_id,
-        description=benchmark["description"],
-        difficulty=benchmark["difficulty"],
-        success=result["success"],
-        synthesis_time=elapsed,
-        attempts=result.get("attempts", max_attempts),
-        category=benchmark["category"]
+    # Synthesize
+    result = await synthesize_circuit(
+        problem.description,
+        model=model,
+        verify=True
     )
     
     return {
         "benchmark_id": benchmark_id,
-        "category": benchmark["category"],
-        "difficulty": benchmark["difficulty"],
-        "success": result["success"],
-        "synthesis_time": round(elapsed, 2),
-        "attempts": result.get("attempts", 0),
-        "generated_code": result.get("code"),
-        "verification": verification,
-        "analysis": result.get("analysis")
+        "description": problem.description,
+        "difficulty": problem.difficulty,
+        "category": problem.category,
+        "success": result.get("valid", False),
+        "code": result.get("code"),
+        "verification": result.get("verification"),
+        "time": time.time() - start_time,
+        "model": model or config.default_model
     }
 
 @mcp.tool()
-async def list_benchmarks(category: str = "") -> dict:
-    """List available benchmark problems.
+async def get_curriculum_problem(
+    student_level: float = 0.5,
+    category: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Get the next curriculum problem based on student level.
     
     Args:
-        category: Filter by category (optional)
+        student_level: Current student proficiency (0.0 to 1.0)
+        category: Optional category filter
     
     Returns:
-        List of available benchmarks
+        Next recommended problem
     """
-    if category:
-        benchmarks = [b for b in CURRICULUM_PROBLEMS if b["category"] == category]
-    else:
-        benchmarks = CURRICULUM_PROBLEMS
+    return curriculum_manager.get_next_problem(student_level, category)
+
+@mcp.tool()
+async def record_learning_attempt(
+    problem_id: str,
+    success: bool,
+    time_taken: float,
+    code: Optional[str] = None
+) -> Dict[str, Any]:
+    """
+    Record a learning attempt for curriculum adaptation.
     
-    # Group by category
-    by_category = {}
-    for b in benchmarks:
-        cat = b["category"]
-        if cat not in by_category:
-            by_category[cat] = []
-        by_category[cat].append({
-            "id": b["id"],
-            "description": b["description"],
-            "difficulty": b["difficulty"]
-        })
+    Args:
+        problem_id: ID of the attempted problem
+        success: Whether the attempt was successful
+        time_taken: Time taken in seconds
+        code: Optional generated code
+    
+    Returns:
+        Updated curriculum statistics
+    """
+    curriculum_manager.record_attempt(problem_id, success, time_taken)
+    return curriculum_manager.get_statistics()
+
+@mcp.tool()
+async def get_curriculum_statistics() -> Dict[str, Any]:
+    """Get curriculum learning statistics."""
+    return curriculum_manager.get_statistics()
+
+@mcp.tool()
+async def execute_on_simulator(
+    circuit_code: str,
+    shots: int = 1000
+) -> Dict[str, Any]:
+    """
+    Execute a circuit on the local Qiskit simulator.
+    
+    Args:
+        circuit_code: Python code that creates a QuantumCircuit named 'qc'
+        shots: Number of measurement shots
+    
+    Returns:
+        Execution results with measurement counts
+    """
+    return await hardware_manager.run_on_simulator(circuit_code, shots)
+
+@mcp.tool()
+async def execute_on_hardware(
+    circuit_code: str,
+    provider: str = "local_simulator",
+    device: Optional[str] = None,
+    shots: int = 1000
+) -> Dict[str, Any]:
+    """
+    Execute a circuit on quantum hardware or simulator.
+    
+    Args:
+        circuit_code: Python code that creates a QuantumCircuit named 'qc'
+        provider: Hardware provider ('local_simulator', 'ionq', 'rigetti', 'iqm')
+        device: Specific device ID (optional)
+        shots: Number of measurement shots
+    
+    Returns:
+        Execution results
+    """
+    return await hardware_manager.run_on_hardware(
+        circuit_code, 
+        provider=provider,
+        device=device,
+        shots=shots
+    )
+
+@mcp.tool()
+async def get_available_hardware() -> Dict[str, Any]:
+    """Get available quantum hardware status."""
+    return hardware_manager.get_hardware_status()
+
+@mcp.tool()
+async def list_available_models() -> Dict[str, Any]:
+    """List available OpenRouter models for synthesis."""
+    recommended = [
+        {
+            "id": "deepseek/deepseek-chat",
+            "name": "DeepSeek Chat",
+            "description": "Fast, good for code generation",
+            "cost": "Low"
+        },
+        {
+            "id": "deepseek/deepseek-reasoner",
+            "name": "DeepSeek R1",
+            "description": "Best for complex reasoning (Teacher)",
+            "cost": "Medium"
+        },
+        {
+            "id": "anthropic/claude-3.5-sonnet",
+            "name": "Claude 3.5 Sonnet",
+            "description": "Excellent code quality",
+            "cost": "Medium"
+        },
+        {
+            "id": "openai/gpt-4-turbo",
+            "name": "GPT-4 Turbo",
+            "description": "High quality, reliable",
+            "cost": "High"
+        },
+        {
+            "id": "meta-llama/llama-3.1-70b-instruct",
+            "name": "Llama 3.1 70B",
+            "description": "Good balance of quality and cost",
+            "cost": "Low"
+        }
+    ]
     
     return {
-        "benchmarks": by_category,
-        "total": len(benchmarks),
-        "categories": list(by_category.keys())
+        "default_model": config.default_model,
+        "teacher_model": config.teacher_model,
+        "recommended_models": recommended,
+        "note": "You can use any OpenRouter model by passing the model ID"
     }
-
-# ============================================================================
-# MCP Tools - Multi-Agent
-# ============================================================================
-
-@mcp.tool()
-async def parallel_synthesize(
-    description: str,
-    num_agents: int = 2
-) -> dict:
-    """Synthesize using multiple agents in parallel.
-    
-    Args:
-        description: Circuit description
-        num_agents: Number of parallel synthesis attempts
-    
-    Returns:
-        Results from all agents with best selection
-    """
-    logger.info(f"Parallel synthesis with {num_agents} agents")
-    
-    prompt = SYNTHESIS_PROMPT.format(description=description)
-    result = await multi_agent.parallel_synthesize(prompt, num_attempts=num_agents)
-    
-    # Extract and validate best result
-    if result["success"] and result.get("best_result"):
-        code = extract_circuit_code(result["best_result"]["code"])
-        try:
-            exec_globals = {}
-            exec(code, exec_globals)
-            if 'qc' in exec_globals:
-                result["best_result"]["validated_code"] = code
-                result["best_result"]["analysis"] = analyze_circuit(code)
-        except:
-            pass
-    
-    return result
-
-@mcp.tool()
-async def get_backend_status() -> dict:
-    """Get status of all inference backends.
-    
-    Returns:
-        Dictionary with backend availability
-    """
-    return await multi_agent.get_backend_status()
-
-# ============================================================================
-# MCP Tools - Teacher
-# ============================================================================
-
-@mcp.tool()
-async def generate_stepping_stone(
-    target_problem: str,
-    failure_trace: str = ""
-) -> dict:
-    """Generate a stepping stone problem using the Teacher.
-    
-    Args:
-        target_problem: The hard target problem
-        failure_trace: Previous failure information
-    
-    Returns:
-        Stepping stone problem with reference solution
-    """
-    if not config.openrouter_api_key:
-        return {"error": "Teacher not configured. Set OPENROUTER_API_KEY."}
-    
-    async with TeacherClient() as teacher:
-        return await teacher.generate_stepping_stone(
-            target_problem=target_problem,
-            capability_level=curriculum_manager.state.capability_level,
-            failure_trace=failure_trace
-        )
-
-@mcp.tool()
-async def evaluate_solution(
-    problem_description: str,
-    student_code: str,
-    reference_code: str
-) -> dict:
-    """Evaluate a student solution using the Teacher.
-    
-    Args:
-        problem_description: The problem that was attempted
-        student_code: The student's generated code
-        reference_code: The reference solution
-    
-    Returns:
-        Evaluation with feedback and hints
-    """
-    if not config.openrouter_api_key:
-        return {"error": "Teacher not configured. Set OPENROUTER_API_KEY."}
-    
-    async with TeacherClient() as teacher:
-        return await teacher.evaluate_student_solution(
-            problem_description=problem_description,
-            student_code=student_code,
-            reference_code=reference_code
-        )
-
-# ============================================================================
-# MCP Tools - Memory
-# ============================================================================
-
-@mcp.tool()
-async def find_similar_circuits(
-    query: str,
-    n_results: int = 5
-) -> dict:
-    """Find similar circuits from episodic memory.
-    
-    Args:
-        query: Problem description to search for
-        n_results: Number of results to return
-    
-    Returns:
-        List of similar problems with solutions
-    """
-    results = stepping_stone_memory.find_similar_problems(query, n_results)
-    return {
-        "query": query,
-        "results": results,
-        "count": len(results)
-    }
-
-# ============================================================================
-# MCP Tools - Status & Utilities
-# ============================================================================
-
-@mcp.tool()
-async def check_server_status() -> dict:
-    """Check the status of all UniQ-MCP server components.
-    
-    Returns:
-        Dictionary with status of each component
-    """
-    status = {
-        "server": "running",
-        "version": "3.0 (SOAR)",
-        "components": {}
-    }
-    
-    # Check Airlock (Student)
-    airlock_status = await check_airlock_health()
-    status["components"]["airlock_student"] = airlock_status
-    
-    # Check Teacher
-    if config.openrouter_api_key:
-        teacher_status = await test_teacher_connection()
-        status["components"]["teacher"] = teacher_status
-    else:
-        status["components"]["teacher"] = {"status": "not_configured"}
-    
-    # Check Qiskit
-    try:
-        import qiskit
-        status["components"]["qiskit"] = {"status": "available", "version": qiskit.__version__}
-    except ImportError:
-        status["components"]["qiskit"] = {"status": "not_installed"}
-    
-    # Check ChromaDB
-    try:
-        import chromadb
-        status["components"]["chromadb"] = {"status": "available", "version": chromadb.__version__}
-    except ImportError:
-        status["components"]["chromadb"] = {"status": "not_installed"}
-    
-    # Check hardware
-    status["components"]["quantum_hardware"] = await hardware_manager.get_available_hardware()
-    
-    # Curriculum state
-    status["curriculum"] = {
-        "capability_level": curriculum_manager.state.capability_level,
-        "total_attempts": curriculum_manager.state.total_attempts,
-        "success_rate": curriculum_manager.state.success_rate
-    }
-    
-    return status
 
 @mcp.tool()
 async def generate_latex_table(
-    benchmark_results: list,
-    title: str = "Benchmark Results"
-) -> str:
-    """Generate a LaTeX table from benchmark results.
+    benchmark_ids: List[str],
+    include_code: bool = False
+) -> Dict[str, Any]:
+    """
+    Run benchmarks and generate a LaTeX table of results.
     
     Args:
-        benchmark_results: List of benchmark result dictionaries
-        title: Table title
+        benchmark_ids: List of benchmark IDs to run
+        include_code: Whether to include code snippets
     
     Returns:
-        LaTeX table code
+        LaTeX table and raw results
     """
-    latex = f"""\\begin{{table}}[h]
-\\centering
-\\caption{{{title}}}
-\\begin{{tabular}}{{|l|c|c|c|c|}}
-\\hline
-\\textbf{{Benchmark}} & \\textbf{{Category}} & \\textbf{{Difficulty}} & \\textbf{{Success}} & \\textbf{{Time (s)}} \\\\
-\\hline
-"""
+    results = []
     
-    for result in benchmark_results:
-        success = "\\checkmark" if result.get("success") else "\\texttimes"
-        latex += f"{result.get('benchmark_id', 'N/A')} & {result.get('category', 'N/A')} & {result.get('difficulty', 'N/A')} & {success} & {result.get('synthesis_time', 'N/A')} \\\\\n"
+    for bid in benchmark_ids:
+        result = await run_benchmark(bid)
+        results.append(result)
     
-    latex += """\\hline
-\\end{tabular}
-\\end{table}"""
+    # Generate LaTeX
+    latex = "\\begin{table}[h]\n\\centering\n"
+    latex += "\\caption{UniQ-MCP Benchmark Results}\n"
+    latex += "\\begin{tabular}{|l|c|c|c|c|}\n\\hline\n"
+    latex += "Benchmark & Difficulty & Success & Time (s) & Gates \\\\\n\\hline\n"
     
-    return latex
+    for r in results:
+        success = "\\checkmark" if r.get("success") else "\\texttimes"
+        gates = r.get("verification", {}).get("gate_count", "N/A")
+        latex += f"{r['benchmark_id']} & {r['difficulty']:.2f} & {success} & {r['time']:.2f} & {gates} \\\\\n"
+    
+    latex += "\\hline\n\\end{tabular}\n\\end{table}"
+    
+    return {
+        "latex": latex,
+        "results": results,
+        "summary": {
+            "total": len(results),
+            "successful": sum(1 for r in results if r.get("success")),
+            "average_time": sum(r["time"] for r in results) / len(results) if results else 0
+        }
+    }
 
 # ============================================================================
-# Server Entry Point
+# Main Entry Point
 # ============================================================================
 
 def main():
-    """Run the UniQ-MCP v3 server."""
-    logger.info("Starting UniQ-MCP Server v3 (SOAR Framework)...")
-    logger.info(f"Airlock: {'configured' if config.airlock_url else 'not configured'}")
-    logger.info(f"Teacher: {'configured' if config.openrouter_api_key else 'not configured'}")
-    mcp.run(transport="stdio")
+    """Run the MCP server."""
+    logger.info("Starting UniQ-MCP v4 (OpenRouter Edition)")
+    logger.info(f"Default model: {config.default_model}")
+    logger.info(f"Teacher model: {config.teacher_model}")
+    
+    if not config.openrouter_api_key:
+        logger.warning("OPENROUTER_API_KEY not set - synthesis will fail")
+    
+    mcp.run()
 
 if __name__ == "__main__":
     main()

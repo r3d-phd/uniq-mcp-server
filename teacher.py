@@ -6,8 +6,9 @@ Asymmetric RL) framework. The Teacher generates "stepping stone" problems that
 bridge the gap between the Student's current capabilities and hard target problems.
 
 Architecture:
-- Teacher: DeepSeek-R1 (70B) via OpenRouter API for curriculum generation
-- Student: Mistral 7B via Airlock for execution (in server.py)
+- Teacher: DeepSeek-R1 via OpenRouter API for curriculum generation
+- Student: DeepSeek-Chat via OpenRouter API for execution (in server.py)
+- No local GPU or tunnels required!
 """
 
 import os

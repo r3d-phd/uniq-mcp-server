@@ -1,204 +1,209 @@
-# UniQ-MCP Server
+# UniQ-MCP v4 - Quantum Circuit Synthesis Server
 
-A Model Context Protocol (MCP) server that exposes quantum circuit synthesis capabilities for seamless integration with AI assistants like Manus.
+**Simplified OpenRouter Edition** - No local GPU, tunnels, or HTTP server required!
 
-## Overview
+## Quick Start
 
-UniQ-MCP Server converts the UniQ-MCP v13 quantum circuit synthesis system into an MCP server that can be called directly from AI conversations. This enables:
+### 1. Get OpenRouter API Key
+Visit [openrouter.ai/keys](https://openrouter.ai/keys) and create an API key.
 
-- **Natural language circuit synthesis**: "Generate a Bell state circuit"
-- **Automatic verification**: Circuits are validated before returning
-- **Benchmark execution**: Run standardised quantum computing benchmarks
-- **Hardware execution**: Execute circuits on simulators or AWS Braket
-- **Publication-ready exports**: Generate LaTeX tables for papers
+### 2. Configure Environment
+```bash
+cd ~/Downloads/uniq-mcp-server
+cp .env.example .env
+# Edit .env and add your OPENROUTER_API_KEY
+```
 
-## Features
+### 3. Install Dependencies
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
 
-| Tool | Description |
-|------|-------------|
-| `synthesize_circuit` | Generate quantum circuits from natural language |
-| `verify_circuit` | Verify circuit equivalence |
-| `analyze_quantum_circuit` | Analyze circuit properties (depth, gates, etc.) |
-| `run_benchmark` | Run specific benchmark problems |
-| `list_benchmarks` | List available benchmarks |
-| `execute_on_simulator` | Execute circuits on local simulator |
-| `check_server_status` | Check status of all components |
-| `get_curriculum_problem` | Get problems from adaptive curriculum |
-| `generate_latex_table` | Generate publication-ready LaTeX tables |
-
-## Installation
-
-### Prerequisites
-
-- Python 3.10 or higher
-- Airlock server running on your local GPU (optional but recommended)
-
-### Setup
-
-1. **Clone or extract the server:**
-   ```bash
-   cd uniq-mcp-server
-   ```
-
-2. **Install dependencies:**
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-3. **Configure environment:**
-   ```bash
-   cp .env.example .env
-   # Edit .env with your Airlock credentials
-   ```
-
-4. **Test the server:**
-   ```bash
-   python3 server.py
-   ```
-
-## Configuration
-
-### Environment Variables
-
-| Variable | Description | Required |
-|----------|-------------|----------|
-| `AIRLOCK_URL` | Cloudflare tunnel URL for Airlock | Yes (for synthesis) |
-| `AIRLOCK_API_KEY` | Airlock API key | Yes (for synthesis) |
-| `AWS_ACCESS_KEY_ID` | AWS access key | No (for Braket) |
-| `AWS_SECRET_ACCESS_KEY` | AWS secret key | No (for Braket) |
-| `GEMINI_API_KEY` | Google Gemini API key | No (for Teacher) |
-| `OPENROUTER_API_KEY` | OpenRouter API key | No (for Teacher) |
-
-### MCP Client Configuration
-
-To use with Claude Desktop or other MCP clients, add to your MCP configuration:
-
+### 4. Configure Manus MCP
+Add to your Manus MCP configuration:
 ```json
 {
   "mcpServers": {
     "uniq-mcp": {
-      "command": "python3",
+      "command": "python",
       "args": ["/path/to/uniq-mcp-server/server.py"],
       "env": {
-        "AIRLOCK_URL": "https://your-tunnel.trycloudflare.com",
-        "AIRLOCK_API_KEY": "your-api-key"
+        "OPENROUTER_API_KEY": "your_key_here"
       }
     }
   }
 }
 ```
 
-## Usage Examples
-
-### From Manus Conversations
-
-Once configured, you can use UniQ-MCP directly in conversations:
-
-**Circuit Synthesis:**
+### 5. Use in Manus
 ```
-User: "Generate a 3-qubit GHZ state circuit"
-Manus: [calls synthesize_circuit] → Returns verified Qiskit code
+Using UniQ-MCP, synthesize a Bell state circuit
 ```
 
-**Run Benchmarks:**
-```
-User: "Run the Bell state benchmark"
-Manus: [calls run_benchmark("bell_state")] → Returns results
-```
+---
 
-**Execute on Simulator:**
-```
-User: "Execute this circuit and show me the measurement results"
-Manus: [calls execute_on_simulator] → Returns counts
-```
+## Available Tools
 
-**Generate LaTeX:**
-```
-User: "Generate a LaTeX table of the benchmark results"
-Manus: [calls generate_latex_table] → Returns publication-ready LaTeX
-```
+| Tool | Description |
+|------|-------------|
+| `check_server_status` | Check server status and configuration |
+| `synthesize_circuit` | Generate quantum circuit from description |
+| `synthesize_with_teacher` | Teacher-guided synthesis with stepping stones |
+| `run_benchmark` | Run a curriculum benchmark |
+| `list_benchmarks` | List all 26 benchmarks |
+| `execute_on_simulator` | Run circuit on local Qiskit simulator |
+| `execute_on_hardware` | Run on AWS Braket hardware (when available) |
+| `get_available_hardware` | List available quantum hardware |
+| `get_curriculum_problem` | Get next adaptive curriculum problem |
+| `record_learning_attempt` | Record learning attempt for adaptation |
+| `get_curriculum_statistics` | Get curriculum learning statistics |
+| `list_available_models` | Show available OpenRouter models |
+| `generate_latex_table` | Generate LaTeX results table |
 
-### Programmatic Usage
-
-```python
-import asyncio
-from server import synthesize_circuit, run_benchmark
-
-async def main():
-    # Synthesize a circuit
-    result = await synthesize_circuit("Create a Bell state")
-    print(result["code"])
-    
-    # Run a benchmark
-    benchmark = await run_benchmark("bell_state")
-    print(f"Success: {benchmark['success']}, Time: {benchmark['time_taken']}s")
-
-asyncio.run(main())
-```
-
-## Available Benchmarks
-
-| ID | Category | Difficulty | Description |
-|----|----------|------------|-------------|
-| `bell_state` | entanglement | 1 | Bell state |Φ+⟩ |
-| `ghz_3` | entanglement | 2 | 3-qubit GHZ state |
-| `ghz_5` | entanglement | 3 | 5-qubit GHZ state |
-| `x_gate` | basic_gates | 1 | X gate application |
-| `hadamard` | basic_gates | 1 | Hadamard gate |
-| `cnot` | basic_gates | 1 | CNOT gate |
-| `swap` | basic_gates | 2 | SWAP using CNOTs |
-| `toffoli` | multi_qubit | 3 | Toffoli gate |
-| `qft_2` | algorithms | 3 | 2-qubit QFT |
-| `qft_3` | algorithms | 4 | 3-qubit QFT |
-| `grover_2` | algorithms | 4 | 2-qubit Grover's |
-| `teleportation` | protocols | 3 | Quantum teleportation |
+---
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                    UniQ-MCP Server                          │
+│                    UniQ-MCP v4                               │
 ├─────────────────────────────────────────────────────────────┤
-│  MCP Interface Layer (FastMCP)                              │
-│  └── @mcp.tool() decorated functions                        │
-├─────────────────────────────────────────────────────────────┤
-│  Core Services                                              │
-│  ├── Circuit Synthesis (Airlock + LLM)                      │
-│  ├── Verification (Qiskit Operator)                         │
-│  ├── Benchmarks (12 standard problems)                      │
-│  └── Simulation (Qiskit Statevector)                        │
-├─────────────────────────────────────────────────────────────┤
-│  Backends                                                   │
-│  ├── Airlock (Local GPU - Mistral 7B)                       │
-│  ├── Qiskit (Circuit manipulation)                          │
-│  └── AWS Braket (Cloud/Hardware - optional)                 │
+│                                                              │
+│   Manus ◄──MCP STDIO──► UniQ-MCP Server                     │
+│                              │                               │
+│                              ▼                               │
+│                    ┌─────────────────┐                       │
+│                    │   OpenRouter    │                       │
+│                    │  ┌───────────┐  │                       │
+│                    │  │ DeepSeek  │  │ ◄── Student (fast)   │
+│                    │  │   Chat    │  │                       │
+│                    │  └───────────┘  │                       │
+│                    │  ┌───────────┐  │                       │
+│                    │  │ DeepSeek  │  │ ◄── Teacher (reason) │
+│                    │  │    R1     │  │                       │
+│                    │  └───────────┘  │                       │
+│                    └─────────────────┘                       │
+│                              │                               │
+│                              ▼                               │
+│                    ┌─────────────────┐                       │
+│                    │  Qiskit/Braket  │ ◄── Execution        │
+│                    └─────────────────┘                       │
+│                                                              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
+---
+
+## Model Options
+
+You can specify any OpenRouter model for synthesis:
+
+| Model | Use Case | Cost |
+|-------|----------|------|
+| `deepseek/deepseek-chat` | Fast synthesis (default) | Low |
+| `deepseek/deepseek-reasoner` | Teacher reasoning | Medium |
+| `anthropic/claude-3.5-sonnet` | High quality code | Medium |
+| `openai/gpt-4-turbo` | Maximum reliability | High |
+| `meta-llama/llama-3.1-70b-instruct` | Good balance | Low |
+
+Example:
+```
+Using UniQ-MCP, synthesize a GHZ state using claude-3.5-sonnet
+```
+
+---
+
+## Benchmarks
+
+26 problems across 5 categories:
+
+| Category | Problems |
+|----------|----------|
+| **Basic Gates** | H, X, Y, Z, T gates |
+| **Two-Qubit** | CNOT, CZ, SWAP, iSWAP |
+| **Entanglement** | Bell states, GHZ (3-5 qubits), W states |
+| **Algorithms** | QFT (2-4 qubits), Grover (2-3 qubits), Deutsch-Jozsa |
+| **Advanced** | Toffoli, Fredkin, Teleportation, VQE ansatz |
+
+---
+
+## What Changed from v3?
+
+| v3 (Airlock) | v4 (OpenRouter) |
+|--------------|-----------------|
+| Local RTX 2070 required | No local GPU needed |
+| Cloudflare tunnel required | No tunnels needed |
+| HTTP server wrapper | Direct MCP STDIO |
+| Mistral 7B only | Multiple models available |
+| Complex startup scripts | Simple API key setup |
+| ~30s latency | ~5-15s latency |
+
+---
+
+## Environment Variables
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `OPENROUTER_API_KEY` | **Yes** | Your OpenRouter API key |
+| `UNIQ_DEFAULT_MODEL` | No | Default model (deepseek/deepseek-chat) |
+| `UNIQ_TEACHER_MODEL` | No | Teacher model (deepseek/deepseek-reasoner) |
+| `AWS_ACCESS_KEY_ID` | No | For AWS Braket hardware |
+| `AWS_SECRET_ACCESS_KEY` | No | For AWS Braket hardware |
+
+---
+
+## Usage Examples
+
+### Basic Synthesis
+```
+Using UniQ-MCP, create a Bell state circuit
+```
+
+### With Model Selection
+```
+Using UniQ-MCP, synthesize a 3-qubit QFT using gpt-4-turbo
+```
+
+### Run Benchmark
+```
+Using UniQ-MCP, run the ghz_3 benchmark
+```
+
+### Execute on Simulator
+```
+Using UniQ-MCP, execute this Bell state on the simulator with 1000 shots
+```
+
+### Generate LaTeX Table
+```
+Using UniQ-MCP, run all entanglement benchmarks and generate a LaTeX table
+```
+
+---
+
 ## Troubleshooting
 
-### Server won't start
+### "OPENROUTER_API_KEY not set"
+Add your API key to `.env` or pass it via MCP config.
 
-1. Check Python version: `python3 --version` (need 3.10+)
-2. Install dependencies: `pip install -r requirements.txt`
-3. Check for import errors: `python3 -c "import mcp; import qiskit"`
+### Synthesis fails
+- Check your OpenRouter balance
+- Try a different model
+- Simplify the circuit description
 
-### Airlock connection fails
+### Module import errors
+```bash
+pip install mcp qiskit httpx chromadb
+```
 
-1. Verify Airlock is running on your local machine
-2. Check the tunnel URL is correct and accessible
-3. Verify API key is correct
-
-### Circuit synthesis fails
-
-1. Check Airlock health: Use `check_server_status` tool
-2. Try simpler circuits first (e.g., X gate)
-3. Increase `max_attempts` parameter
+---
 
 ## License
 
-MIT License - See LICENSE file for details.
+MIT License - For academic research use.
 
 ## Contributing
 
-Contributions welcome! Please submit issues and pull requests on GitHub.
+Contributions welcome! Submit issues and PRs on GitHub.
