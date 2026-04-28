@@ -41,6 +41,17 @@ from quantum_hardware import QuantumHardwareManager, execute_on_quantum_hardware
 # Initialize FastMCP server
 mcp = FastMCP("uniq-mcp-v4", dependencies=["qiskit", "httpx", "chromadb"])
 
+# Import QuanBench+ module
+try:
+    from quanbench_plus import QUANBENCH_TASKS as _QB_LIST, feedback_repair_loop, get_quanbench_statistics, get_quanbench_task_by_id
+    QUANBENCH_TASKS = {t["id"]: t for t in _QB_LIST}
+    run_quanbench_task_with_repair = feedback_repair_loop
+    QUANBENCH_LOADED = True
+except ImportError as e:
+    logger.warning(f"QuanBench+ not loaded: {e}")
+    QUANBENCH_LOADED = False
+    QUANBENCH_TASKS = {}
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -617,6 +628,89 @@ async def generate_latex_table(
             "successful": sum(1 for r in results if r.get("success")),
             "average_time": sum(r["time"] for r in results) / len(results) if results else 0
         }
+    }
+
+# ============================================================================
+# QuanBench+ Tools
+# ============================================================================
+
+@mcp.tool()
+async def list_quanbench_tasks(category: str = None) -> Dict[str, Any]:
+    """
+    List all 42 QuanBench+ benchmark tasks for quantum code generation evaluation.
+    
+    Args:
+        category: Optional filter — decomposition, state_preparation, or quantum_algorithms
+    
+    Returns:
+        List of tasks with id, description, category, difficulty, and statistics
+    """
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    tasks = list(QUANBENCH_TASKS.values())
+    if category:
+        tasks = [t for t in tasks if t.get("category_qb") == category or t.get("category") == category]
+    stats = get_quanbench_statistics()
+    return {
+        "total": len(tasks),
+        "tasks": [{"id": t["id"], "description": t["description"], "category": t.get("category_qb", t.get("category")), "difficulty": t.get("difficulty", "medium")} for t in tasks],
+        "statistics": stats
+    }
+
+@mcp.tool()
+async def run_quanbench_task(task_id: str, framework: str = "qiskit", max_repair_attempts: int = 3) -> Dict[str, Any]:
+    """
+    Run a single QuanBench+ task with feedback-based repair loop.
+    
+    Args:
+        task_id: Task ID from list_quanbench_tasks
+        framework: Target framework — qiskit (default) or cirq
+        max_repair_attempts: Maximum repair iterations (default 3)
+    
+    Returns:
+        pass_at_1 (first attempt), pass_at_1_fb (after repair), and execution details
+    """
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    if task_id not in QUANBENCH_TASKS:
+        return {"error": f"Task '{task_id}' not found. Use list_quanbench_tasks to see available tasks."}
+    task = QUANBENCH_TASKS[task_id]
+    result = await run_quanbench_task_with_repair(task, framework=framework, max_attempts=max_repair_attempts)
+    return result
+
+@mcp.tool()
+async def run_quanbench_suite(category: str = None, framework: str = "qiskit") -> Dict[str, Any]:
+    """
+    Run the full QuanBench+ benchmark suite (42 tasks) and return aggregate scores.
+    
+    Args:
+        category: Optional category filter — decomposition, state_preparation, quantum_algorithms
+        framework: Target framework — qiskit (default) or cirq
+    
+    Returns:
+        Pass@1 and Pass@1-FB scores across all tasks or a specific category
+    """
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    tasks = list(QUANBENCH_TASKS.values())
+    if category:
+        tasks = [t for t in tasks if t.get("category_qb") == category or t.get("category") == category]
+    results = []
+    pass_at_1 = 0
+    pass_at_1_fb = 0
+    for task in tasks:
+        r = await run_quanbench_task_with_repair(task, framework=framework, max_attempts=3)
+        results.append(r)
+        if r.get("pass_at_1"):
+            pass_at_1 += 1
+        if r.get("pass_at_1_fb"):
+            pass_at_1_fb += 1
+    n = len(tasks)
+    return {
+        "total_tasks": n,
+        "pass_at_1": pass_at_1 / n if n > 0 else 0,
+        "pass_at_1_fb": pass_at_1_fb / n if n > 0 else 0,
+        "results": results
     }
 
 # ============================================================================
