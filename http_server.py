@@ -52,6 +52,18 @@ except ImportError as e:
     logger.warning(f"Some modules not loaded: {e}")
     MODULES_LOADED = False
 
+# Import QuanBench+ module
+try:
+    from quanbench_plus import QUANBENCH_TASKS as _QB_LIST, feedback_repair_loop, get_quanbench_statistics, get_quanbench_task_by_id
+    # Convert list to dict keyed by task id for fast lookup
+    QUANBENCH_TASKS = {t["id"]: t for t in _QB_LIST}
+    run_quanbench_task_with_repair = feedback_repair_loop
+    QUANBENCH_LOADED = True
+except ImportError as e:
+    logger.warning(f"QuanBench+ not loaded: {e}")
+    QUANBENCH_LOADED = False
+    QUANBENCH_TASKS = {}
+
 # Global instances
 curriculum_manager = None
 hardware_manager = None
@@ -286,6 +298,59 @@ async def tool_generate_stepping_stone(
     except Exception as e:
         return {"error": str(e)}
 
+# ============================================================================
+# QuanBench+ Tool Implementations
+# ============================================================================
+
+async def tool_list_quanbench_tasks(category: str = None) -> Dict:
+    """List all 42 QuanBench+ benchmark tasks for quantum code generation evaluation."""
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    tasks = list(QUANBENCH_TASKS.values())
+    if category:
+        tasks = [t for t in tasks if t.get("category_qb") == category or t.get("category") == category]
+    stats = get_quanbench_statistics()
+    return {
+        "total": len(tasks),
+        "tasks": [{"id": t["id"], "description": t["description"], "category": t.get("category_qb", t.get("category")), "difficulty": t.get("difficulty", "medium")} for t in tasks],
+        "statistics": stats
+    }
+
+async def tool_run_quanbench_task(task_id: str, framework: str = "qiskit", max_repair_attempts: int = 3) -> Dict:
+    """Run a single QuanBench+ task with feedback-based repair loop."""
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    if task_id not in QUANBENCH_TASKS:
+        return {"error": f"Task '{task_id}' not found. Use list_quanbench_tasks to see available tasks."}
+    task = QUANBENCH_TASKS[task_id]
+    result = await run_quanbench_task_with_repair(task, framework=framework, max_attempts=max_repair_attempts)
+    return result
+
+async def tool_run_quanbench_suite(category: str = None, framework: str = "qiskit") -> Dict:
+    """Run the full QuanBench+ benchmark suite (42 tasks) and return Pass@1 and Pass@1-FB scores."""
+    if not QUANBENCH_LOADED:
+        return {"error": "QuanBench+ module not loaded"}
+    tasks = list(QUANBENCH_TASKS.values())
+    if category:
+        tasks = [t for t in tasks if t.get("category_qb") == category or t.get("category") == category]
+    results = []
+    pass_at_1 = 0
+    pass_at_1_fb = 0
+    for task in tasks:
+        r = await run_quanbench_task_with_repair(task, framework=framework, max_attempts=3)
+        results.append(r)
+        if r.get("pass_at_1"):
+            pass_at_1 += 1
+        if r.get("pass_at_1_fb"):
+            pass_at_1_fb += 1
+    n = len(tasks)
+    return {
+        "total_tasks": n,
+        "pass_at_1": pass_at_1 / n if n > 0 else 0,
+        "pass_at_1_fb": pass_at_1_fb / n if n > 0 else 0,
+        "results": results
+    }
+
 # Tool registry with schemas
 TOOLS = {
     "check_server_status": {
@@ -392,6 +457,42 @@ TOOLS = {
                 "failure_trace": {"type": "string", "default": ""}
             },
             "required": ["target_problem"]
+        }
+    },
+    "list_quanbench_tasks": {
+        "func": tool_list_quanbench_tasks,
+        "description": "List all 42 QuanBench+ benchmark tasks for quantum code generation evaluation. Filter by category: decomposition, state_preparation, quantum_algorithms.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Filter by category: decomposition, state_preparation, quantum_algorithms"}
+            },
+            "required": []
+        }
+    },
+    "run_quanbench_task": {
+        "func": tool_run_quanbench_task,
+        "description": "Run a single QuanBench+ task with feedback-based repair loop. Returns pass_at_1 (first attempt) and pass_at_1_fb (after repair) metrics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "Task ID from list_quanbench_tasks"},
+                "framework": {"type": "string", "default": "qiskit"},
+                "max_repair_attempts": {"type": "integer", "default": 3}
+            },
+            "required": ["task_id"]
+        }
+    },
+    "run_quanbench_suite": {
+        "func": tool_run_quanbench_suite,
+        "description": "Run the full QuanBench+ benchmark suite (42 tasks) and return Pass@1 and Pass@1-FB scores across all tasks or a specific category.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "category": {"type": "string", "description": "Optional category filter"},
+                "framework": {"type": "string", "default": "qiskit"}
+            },
+            "required": []
         }
     }
 }
